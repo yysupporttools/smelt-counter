@@ -134,7 +134,8 @@
       <button class="danger" onclick="resetPersonal()">自分のデータをリセット</button>
     </div>
     <div class="small" style="margin-top:10px">
-      自分のデータをリセットしても、みんなの共有データは削除されません。
+      自分のデータをリセットしても、みんなの共有データは削除されません。<br>
+      失敗時ルール：+4→+5は+3、+5→+6は+2、+6→+7は+0、+7→+8以降は装備ロスト。
     </div>
   </div>
 </div>
@@ -200,6 +201,7 @@ async function loadShared() {
 function applyFailureRule(from) {
   if(from===4) personal.stage=3;
   else if(from===5) personal.stage=2;
+  else if(from===6) personal.stage=0;
   else if(from>=7) personal.lost=true;
 }
 
@@ -315,6 +317,7 @@ function renderCurrent() {
     sb.disabled=fb.disabled=false;
     if(personal.stage===4) rule.textContent="失敗すると +3 に戻ります。";
     else if(personal.stage===5) rule.textContent="失敗すると +2 に戻ります。";
+    else if(personal.stage===6) rule.textContent="失敗すると +0 に戻ります。";
     else if(personal.stage>=7) rule.textContent="失敗すると装備がロストします。";
     else rule.textContent="成功すると次の段階へ進みます。失敗時は現在値を維持します。";
   }

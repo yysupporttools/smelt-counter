@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>精錬成功率カウンター</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;background:#17131f;color:#f5f1ff;font-family:Arial,"Yu Gothic",sans-serif}
+.app{width:min(920px,100%);margin:auto;padding:18px}
+h1{font-size:24px;margin:0 0 6px}.sub{color:#bdb5ca;font-size:13px;margin-bottom:16px}
+.panel{background:#262033;border:1px solid #594a70;border-radius:12px;padding:16px;margin-bottom:14px}
+.current{text-align:center}.label{font-size:13px;color:#bdb5ca}
+.stage{font-size:34px;font-weight:bold;margin:5px 0 8px}
+.rule{font-size:13px;color:#d7cde2;margin:0 auto 14px;line-height:1.6}
+.buttons{display:flex;gap:12px;justify-content:center}
+button{border:0;border-radius:9px;padding:14px 26px;font-size:17px;font-weight:bold;cursor:pointer;color:white}
+button:active{transform:translateY(1px)}
+.success{background:#237a4b}.fail{background:#9b3e46}.reset{background:#51485d;font-size:13px;padding:9px 14px}
+.change{background:#66558a;font-size:14px;padding:10px 16px;margin-top:12px}
+.disabled{opacity:.45;cursor:not-allowed}
+.notice{margin-top:12px;padding:10px;border-radius:8px;background:#332b3f;font-size:13px}
+.lost{background:#542a30;color:#ffb5bb;font-weight:bold}
+.overall{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
+.stat{background:#1c1825;border-radius:9px;padding:11px;text-align:center}
+.stat b{display:block;font-size:20px;margin-top:4px}
+table{width:100%;border-collapse:collapse;font-size:14px}
+th,td{padding:9px 7px;border-bottom:1px solid #41384d;text-align:center}
+th{color:#cfc6da;font-weight:normal}.rate{font-weight:bold}
+.small{font-size:12px;color:#a9a1b4;margin-top:9px}
+.changebox{display:flex;justify-content:center;align-items:center;gap:10px;flex-wrap:wrap}
+select{background:#17131f;color:#fff;border:1px solid #6b5b7c;border-radius:7px;padding:10px 12px;font-size:15px}
+.done{color:#7fe0a9;font-weight:bold;margin-bottom:10px}
+@media(max-width:650px){
+ .overall{grid-template-columns:repeat(2,1fr)} table{font-size:12px}
+ th,td{padding:7px 3px}.buttons button{flex:1;padding:14px 8px}
+}
+</style>
+</head>
+<body>
+<div class="app">
+<h1>精錬成功率カウンター</h1>
+<div class="sub">+0 → +1 → … → +10 の精錬結果を記録します</div>
+
+<div class="panel current">
+  <div class="label">現在の精錬段階</div>
+  <div id="stage" class="stage">+0 → +1</div>
+  <div id="done" class="done" style="display:none">+10到達！精錬完了</div>
+  <div id="lost" class="notice lost" style="display:none">装備ロスト。現在の装備の精錬は終了しています。</div>
+  <div id="rule" class="rule"></div>
+  <div class="buttons">
+    <button id="successBtn" class="success" onclick="record(true)">✓ 成功</button>
+    <button id="failBtn" class="fail" onclick="record(false)">✕ 失敗</button>
+  </div>
+  <div id="notice" class="notice"></div>
+</div>
+
+<div class="panel">
+  <div class="label">現在の強化値を変更</div>
+  <div class="small">別の装備へ切り替えるときや、途中の強化値から記録するときに使用してください。集計データはリセットされません。</div>
+  <div class="changebox" style="margin-top:10px">
+    <select id="stageSelect"></select>
+    <button class="change" onclick="changeStage()">現在値を変更</button>
+  </div>
+</div>
+
+<div class="panel">
+  <div class="label" style="margin-bottom:10px">全体集計</div>
+  <div class="overall">
+    <div class="stat">成功<b id="totalSuccess">0</b></div>
+    <div class="stat">失敗<b id="totalFail">0</b></div>
+    <div class="stat">試行<b id="totalTry">0</b></div>
+    <div class="stat">成功率<b id="totalRate">0.0%</b></div>
+  </div>
+</div>
+
+<div class="panel">
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+    <div class="label">段階別集計</div>
+    <button class="reset" onclick="resetData()">データをリセット</button>
+  </div>
+  <table>
+    <thead><tr><th>精錬</th><th>成功</th><th>失敗</th><th>試行</th><th>成功率</th></tr></thead>
+    <tbody id="rows"></tbody>
+  </table>
+  <div class="small">
+    ※ +4→+5失敗：+3へ戻る ／ +5→+6失敗：+2へ戻る ／ +7→+8以降の失敗：装備ロスト
+  </div>
+</div>
+</div>
+
+<script>
+const KEY="smelting_counter_v2";
+function initial(){return {stage:0,lost:false,rows:Array.from({length:10},()=>({s:0,f:0}))}}
+function load(){
+  try{
+    const x=JSON.parse(localStorage.getItem(KEY));
+    if(x && Array.isArray(x.rows) && x.rows.length===10 && typeof x.stage==="number")
+      return x;
+  }catch(e){}
+  return initial();
+}
+let data=load();
+function save(){localStorage.setItem(KEY,JSON.stringify(data))}
+function pct(s,f){const n=s+f;return n?(s/n*100).toFixed(1)+"%":"—"}
+
+function record(ok){
+  if(data.lost || data.stage>=10)return;
+  const from=data.stage, r=data.rows[from];
+  if(ok){
+    r.s++;
+    data.stage++;
+    data.lost=false;
+  }else{
+    r.f++;
+    // 指定された失敗時の戻り
+    if(from===4)data.stage=3;
+    else if(from===5)data.stage=2;
+    else if(from>=7){
+      data.lost=true;
+    }
+    // +0～+3、+6の失敗は現在値を維持
+  }
+  save();render();
+}
+
+function changeStage(){
+  const v=Number(document.getElementById("stageSelect").value);
+  data.stage=v;
+  data.lost=false;
+  save();render();
+}
+
+function resetData(){
+  if(confirm("記録したデータをすべてリセットしますか？")){
+    data=initial();save();render();
+  }
+}
+
+function render(){
+  const stage=document.getElementById("stage");
+  const done=document.getElementById("done");
+  const lost=document.getElementById("lost");
+  const rule=document.getElementById("rule");
+  const notice=document.getElementById("notice");
+  const sb=document.getElementById("successBtn");
+  const fb=document.getElementById("failBtn");
+
+  if(data.lost){
+    stage.textContent="装備ロスト";
+    done.style.display="none";lost.style.display="block";
+    sb.classList.add("disabled");fb.classList.add("disabled");
+    rule.textContent="次の装備を開始する場合は、下の「現在値を変更」から+0などを選択してください。";
+    notice.textContent="";
+  }else if(data.stage>=10){
+    stage.textContent="+10";
+    done.style.display="block";lost.style.display="none";
+    sb.classList.add("disabled");fb.classList.add("disabled");
+    rule.textContent="この装備は+10まで強化完了です。";
+    notice.textContent="次の装備は「現在の強化値を変更」から開始できます。";
+  }else{
+    stage.textContent=`+${data.stage} → +${data.stage+1}`;
+    done.style.display="none";lost.style.display="none";
+    sb.classList.remove("disabled");fb.classList.remove("disabled");
+    if(data.stage===4) rule.textContent="失敗すると +3 に戻ります。";
+    else if(data.stage===5) rule.textContent="失敗すると +2 に戻ります。";
+    else if(data.stage>=7) rule.textContent="失敗すると装備がロストします。";
+    else rule.textContent="成功すると次の段階へ進みます。失敗時は現在値を維持します。";
+    notice.textContent=`今回の精錬：+${data.stage} → +${data.stage+1}`;
+  }
+
+  const sel=document.getElementById("stageSelect");
+  sel.innerHTML="";
+  for(let i=0;i<=10;i++){
+    const o=document.createElement("option");
+    o.value=i;o.textContent=`+${i}`;
+    if(i===data.stage && !data.lost)o.selected=true;
+    sel.appendChild(o);
+  }
+
+  let ts=0,tf=0;
+  const tbody=document.getElementById("rows");tbody.innerHTML="";
+  data.rows.forEach((r,i)=>{
+    ts+=r.s;tf+=r.f;
+    const tr=document.createElement("tr");
+    tr.innerHTML=`<td>+${i} → +${i+1}</td><td>${r.s}</td><td>${r.f}</td><td>${r.s+r.f}</td><td class="rate">${pct(r.s,r.f)}</td>`;
+    tbody.appendChild(tr);
+  });
+  const tt=ts+tf;
+  document.getElementById("totalSuccess").textContent=ts;
+  document.getElementById("totalFail").textContent=tf;
+  document.getElementById("totalTry").textContent=tt;
+  document.getElementById("totalRate").textContent=tt?(ts/tt*100).toFixed(1)+"%":"0.0%";
+}
+render();
+</script>
+</body>
+</html>

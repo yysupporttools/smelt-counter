@@ -47,6 +47,11 @@
   .tab.active{background:var(--accent)}
   .pending{color:#ffd587}
   .toolbar{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap}
+  .historyList{display:grid;gap:8px;margin-top:12px}
+  .historyItem{display:flex;justify-content:space-between;align-items:center;gap:10px;background:var(--panel2);padding:10px;border-radius:8px}
+  .historyItem .meta{font-size:12px;color:var(--muted)}
+  .historyItem button{padding:8px 12px;font-size:12px}
+  .warnbox{margin-top:10px;padding:10px;border:1px solid #80652f;border-radius:8px;background:#382f20;font-size:12px;line-height:1.6}
   @media(max-width:700px){
     .grid4{grid-template-columns:repeat(2,1fr)}
     .buttons button{flex:1;padding:13px 8px}
@@ -56,7 +61,7 @@
 </head>
 <body>
 <div class="app">
-  <h1>Xen Rebirth 精錬成功率カウンター</h1>
+  <h1>Xen Rebirth 精錬成功率カウンター <span style="font-size:13px;color:var(--muted)">Ver.4</span></h1>
   <div class="sub">自分の記録はこの端末に保存し、共有記録はみんなの集計へ自動反映します。</div>
 
   <div class="panel toolbar">
@@ -127,16 +132,22 @@
   </div>
 
   <div class="panel">
+    <h2>入力履歴・取り消し</h2>
+    <div class="controls"><button id="undoBtn" class="accent" onclick="undoLast()">直前の入力を取り消す</button></div>
+    <div class="small" style="margin-top:10px">Ver.4以降、この端末から入力した記録だけ取り消せます。共有送信済みなら、みんなの集計からも同じ1件を削除します。</div>
+    <div id="historyList" class="historyList"></div>
+  </div>
+
+  <div class="panel">
     <h2>データ管理</h2>
     <div class="controls">
       <button class="secondary" onclick="exportCsv()">自分のデータをCSV出力</button>
       <button class="secondary" onclick="retryPending()">未送信データを再送信</button>
-      <button class="danger" onclick="resetPersonal()">自分のデータをリセット</button>
+      <button class="danger" onclick="resetPersonalOnly()">個人データだけリセット</button>
+      <button class="danger" onclick="resetPersonalAndShared()">個人＋自分の共有データをリセット</button>
     </div>
-    <div class="small" style="margin-top:10px">
-      自分のデータをリセットしても、みんなの共有データは削除されません。<br>
-      失敗時ルール：+4→+5は+3、+5→+6は+2、+6→+7は+0、+7→+8以降は装備ロスト。
-    </div>
+    <div class="warnbox">共有データまでリセットできるのは、Ver.4以降にこのブラウザから登録した記録だけです。他の利用者やVer.4以前の共有記録は削除されません。</div>
+    <div class="small" style="margin-top:10px">失敗時ルール：+4→+5は+3、+5→+6は+2、+6→+7は+0、+7→+8以降は装備ロスト。</div>
   </div>
 </div>
 
@@ -145,6 +156,9 @@ const SUPABASE_URL = "https://dzxxjtmpcfsmvdgkcwvn.supabase.co";
 const SUPABASE_KEY = "sb_publishable_yTgQ5bw5pnSkNCTOH4me8Q_YaQhRkQ_";
 const PERSONAL_KEY = "smelting_counter_personal_v4";
 const QUEUE_KEY = "smelting_counter_pending_v4";
+const HISTORY_KEY = "smelting_counter_history_v4";
+const DEVICE_KEY = "smelting_counter_device_v4";
+const TOKEN_KEY = "smelting_counter_delete_token_v4";
 
 function initialPersonal() {
   return {stage:0,lost:false,rows:Array.from({length:10},()=>({s:0,f:0}))};
@@ -157,12 +171,19 @@ function loadJson(key,fallback) {
 let personal = loadJson(PERSONAL_KEY, initialPersonal());
 if(!personal.rows || personal.rows.length!==10) personal=initialPersonal();
 let pending = loadJson(QUEUE_KEY, []);
+let history = loadJson(HISTORY_KEY, []);
+if(!Array.isArray(history)) history=[];
+function randomId(){ if(crypto.randomUUID) return crypto.randomUUID(); const a=new Uint8Array(16); crypto.getRandomValues(a); return Array.from(a,b=>b.toString(16).padStart(2,"0")).join(""); }
+function getOrCreate(k){ let v=localStorage.getItem(k); if(!v){v=randomId()+randomId();localStorage.setItem(k,v);} return v; }
+const DEVICE_ID=getOrCreate(DEVICE_KEY);
+const DELETE_TOKEN=getOrCreate(TOKEN_KEY);
 let sharedRows = Array.from({length:10},()=>({s:0,f:0}));
 let activeTab = "me";
 let sending = false;
 
 function savePersonal() { localStorage.setItem(PERSONAL_KEY,JSON.stringify(personal)); }
 function savePending() { localStorage.setItem(QUEUE_KEY,JSON.stringify(pending)); }
+function saveHistory() { localStorage.setItem(HISTORY_KEY,JSON.stringify(history)); }
 function pct(s,f) { const n=s+f; return n ? (s/n*100).toFixed(1)+"%" : "—"; }
 
 function setConnection(state,text) {
@@ -177,6 +198,11 @@ async function api(path, options={}) {
     "Content-Type":"application/json"
   }, options.headers||{});
   return fetch(SUPABASE_URL+path, {...options, headers});
+}
+async function rpc(name,body) {
+  const res=await api("/rest/v1/rpc/"+name,{method:"POST",body:JSON.stringify(body)});
+  if(!res.ok) throw new Error(await res.text());
+  const t=await res.text(); try{return t?JSON.parse(t):null}catch(e){return t}
 }
 
 async function loadShared() {
@@ -207,64 +233,34 @@ function applyFailureRule(from) {
 
 async function recordResult(result) {
   if(personal.lost || personal.stage>=10) return;
+  const from=personal.stage, beforeStage=personal.stage, beforeLost=personal.lost, localId=randomId();
+  if(result==="success"){ personal.rows[from].s++; personal.stage++; personal.lost=false; }
+  else { personal.rows[from].f++; applyFailureRule(from); }
 
-  const from=personal.stage;
-  if(result==="success") {
-    personal.rows[from].s++;
-    personal.stage++;
-    personal.lost=false;
-  } else {
-    personal.rows[from].f++;
-    applyFailureRule(from);
-  }
-  savePersonal();
-
-  pending.push({
-    stage_from:from,
-    stage_to:from+1,
-    result:result,
-    local_id:(crypto.randomUUID ? crypto.randomUUID() : String(Date.now())+Math.random()),
-    queued_at:new Date().toISOString()
-  });
-  savePending();
-
-  document.getElementById("recordNotice").textContent =
-    `記録しました：+${from} → +${from+1} ${result==="success"?"成功":"失敗"}`;
-
-  render();
-  await flushPending();
+  const entry={local_id:localId,stage_from:from,stage_to:from+1,result,
+    before_stage:beforeStage,before_lost:beforeLost,created_at:new Date().toISOString(),status:"pending"};
+  history.push(entry);
+  pending.push({stage_from:from,stage_to:from+1,result,local_id:localId,queued_at:entry.created_at});
+  savePersonal(); saveHistory(); savePending();
+  document.getElementById("recordNotice").textContent=`記録しました：+${from} → +${from+1} ${result==="success"?"成功":"失敗"}`;
+  render(); await flushPending();
 }
 
 async function flushPending() {
   if(sending || !pending.length) return;
   sending=true; renderPending();
-
   try {
     while(pending.length) {
       const e=pending[0];
-      const res=await api("/rest/v1/smelt_events",{
-        method:"POST",
-        headers:{"Prefer":"return=minimal"},
-        body:JSON.stringify({
-          stage_from:e.stage_from,
-          stage_to:e.stage_to,
-          result:e.result
-        })
-      });
-      if(!res.ok) throw new Error(await res.text());
-      pending.shift();
-      savePending();
-      renderPending();
+      await rpc("smelt_add_event",{p_stage_from:e.stage_from,p_stage_to:e.stage_to,p_result:e.result,
+        p_device_id:DEVICE_ID,p_local_id:e.local_id,p_delete_token:DELETE_TOKEN});
+      const h=history.find(x=>x.local_id===e.local_id); if(h) h.status="sent";
+      pending.shift(); savePending(); saveHistory(); renderPending(); renderHistory();
     }
-    setConnection("ok","共有データ接続済み");
-    await loadShared();
+    setConnection("ok","共有データ接続済み"); await loadShared();
   } catch(e) {
-    console.error(e);
-    setConnection("ng","共有送信エラー（個人記録は保存済み）");
-  } finally {
-    sending=false;
-    renderPending();
-  }
+    console.error(e); setConnection("ng","共有送信エラー（個人記録は保存済み）");
+  } finally { sending=false; renderPending(); }
 }
 
 function retryPending() { flushPending(); }
@@ -275,10 +271,43 @@ function changeStage() {
 function startNewItem() {
   personal.stage=0; personal.lost=false; savePersonal(); render();
 }
-function resetPersonal() {
-  if(confirm("自分の記録だけをリセットしますか？共有データは消えません。")) {
-    personal=initialPersonal(); savePersonal(); render();
-  }
+function reverseEntry(e){
+  const r=personal.rows[e.stage_from];
+  if(e.result==="success") r.s=Math.max(0,r.s-1); else r.f=Math.max(0,r.f-1);
+  personal.stage=e.before_stage; personal.lost=e.before_lost;
+}
+async function deleteHistoryEntry(localId){
+  const i=history.findIndex(x=>x.local_id===localId);
+  if(i<0) return;
+  if(i!==history.length-1){alert("最新の入力から順番に取り消してください。");return;}
+  const e=history[i];
+  if(!confirm(`+${e.stage_from} → +${e.stage_to} の${e.result==="success"?"成功":"失敗"}を取り消しますか？`)) return;
+  try{
+    const pi=pending.findIndex(x=>x.local_id===localId);
+    if(pi>=0){pending.splice(pi,1);savePending();}
+    else if(e.status==="sent"){
+      const ok=await rpc("smelt_delete_own_event",{p_local_id:e.local_id,p_delete_token:DELETE_TOKEN});
+      if(ok!==true) throw new Error("delete failed");
+    }
+    reverseEntry(e); history.splice(i,1); savePersonal(); saveHistory(); render(); await loadShared();
+    document.getElementById("recordNotice").textContent="直前の入力を取り消しました。";
+  }catch(err){console.error(err);alert("取り消しに失敗しました。通信状態を確認してください。");}
+}
+function undoLast(){ if(!history.length){alert("Ver.4以降の取り消せる履歴がありません。");return;} deleteHistoryEntry(history[history.length-1].local_id); }
+
+function resetPersonalOnly(){
+  if(!confirm("個人集計・入力履歴・未送信データをリセットしますか？\n共有送信済みデータは残ります。")) return;
+  personal=initialPersonal(); history=[]; pending=[]; savePersonal(); saveHistory(); savePending(); render();
+  document.getElementById("recordNotice").textContent="個人データをリセットしました。共有データは残っています。";
+}
+async function resetPersonalAndShared(){
+  if(!confirm("Ver.4以降にこの端末から共有した記録も削除します。\n他の利用者のデータは削除されません。\n\n実行しますか？")) return;
+  try{
+    setConnection("wait","自分の共有データを削除中...");
+    const n=await rpc("smelt_delete_own_events",{p_device_id:DEVICE_ID,p_delete_token:DELETE_TOKEN});
+    personal=initialPersonal(); history=[]; pending=[]; savePersonal(); saveHistory(); savePending(); render(); await loadShared();
+    document.getElementById("recordNotice").textContent=`個人データをリセットし、この端末の共有記録を${Number(n)||0}件削除しました。`;
+  }catch(err){console.error(err);setConnection("ng","共有データ削除エラー");alert("共有データの削除に失敗したため、個人データはリセットしていません。");}
 }
 
 function setTab(tab) {
@@ -287,10 +316,18 @@ function setTab(tab) {
   document.getElementById("summaryMe").style.display = tab==="all" ? "none":"block";
   document.getElementById("summaryAll").style.display = tab==="me" ? "none":"block";
   renderRows();
+  renderHistory();
 }
 
 function renderPending() {
   document.getElementById("pendingCount").textContent=pending.length;
+}
+
+function renderHistory(){
+  const box=document.getElementById("historyList"), btn=document.getElementById("undoBtn");
+  if(btn) btn.disabled=!history.length;
+  if(!history.length){box.innerHTML='<div class="small">Ver.4以降の入力履歴はまだありません。</div>';return;}
+  box.innerHTML=history.slice(-10).reverse().map((e,i)=>`<div class="historyItem"><div><div><b>+${e.stage_from} → +${e.stage_to}</b>　${e.result==="success"?"成功":"失敗"}</div><div class="meta">${new Date(e.created_at).toLocaleString("ja-JP")} / ${e.status==="sent"?"共有済み":"未送信"}</div></div>${i===0?`<button class="danger" onclick="deleteHistoryEntry('${e.local_id}')">取り消す</button>`:""}</div>`).join("");
 }
 
 function renderCurrent() {
